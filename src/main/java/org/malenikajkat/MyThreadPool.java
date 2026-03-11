@@ -42,8 +42,8 @@ public class MyThreadPool implements CustomExecutor {
 
     private void startCoreWorkers() {
         synchronized (workers) {
-            int targetSize = Math.min(Math.max(corePoolSize, minSpareThreads), maxPoolSize);
-            while (workers.size() < targetSize) {
+            int targetSize = Math.max(corePoolSize, minSpareThreads);
+            while (workers.size() < targetSize && workers.size() < maxPoolSize) {
                 addWorker();
             }
         }
@@ -71,9 +71,7 @@ public class MyThreadPool implements CustomExecutor {
             throw new RejectedExecutionException("Pool is shutdown");
         }
 
-        boolean accepted = trySubmitToQueues(command);
-
-        if (accepted) {
+        if (trySubmitToQueues(command)) {
             return;
         }
 
@@ -129,7 +127,9 @@ public class MyThreadPool implements CustomExecutor {
     public void shutdown() {
         isShutdown = true;
         synchronized (workers) {
-            for (Worker w : workers) w.stop();
+            for (Worker w : workers) {
+                w.stop();
+            }
         }
         checkIfTerminated();
     }
@@ -140,7 +140,9 @@ public class MyThreadPool implements CustomExecutor {
         isShutdown = true;
         List<Runnable> drainedTasks = new ArrayList<>();
         synchronized (workers) {
-            for (Worker w : workers) w.interrupt();
+            for (Worker w : workers) {
+                w.interrupt();
+            }
             queues.forEach(queue -> {
                 List<Runnable> batch = new ArrayList<>();
                 queue.drainTo(batch);
@@ -183,25 +185,6 @@ public class MyThreadPool implements CustomExecutor {
         }
     }
 
-    @SuppressWarnings("unused")
-    public int getActiveThreads() {
-        synchronized (workers) {
-            return (int) workers.stream().filter(w -> !w.isIdle()).count();
-        }
-    }
-
-    @SuppressWarnings("unused")
-    public int getTotalQueuedTasks() {
-        return queues.stream().mapToInt(BlockingQueue::size).sum();
-    }
-
-    @SuppressWarnings("unused")
-    public int getPoolSize() {
-        synchronized (workers) {
-            return workers.size();
-        }
-    }
-
     private class Worker implements Runnable {
         private final BlockingQueue<Runnable> queue;
         private volatile boolean running = true;
@@ -212,12 +195,14 @@ public class MyThreadPool implements CustomExecutor {
             this.queue = queue;
         }
 
-        public boolean isIdle() { return idle; }
-        public void stop() { running = false; }
+        public void stop() {
+            running = false;
+            interrupt();
+        }
+
         public void interrupt() {
             if (thread != null) {
                 thread.interrupt();
-                running = false;
             }
         }
 
@@ -225,9 +210,16 @@ public class MyThreadPool implements CustomExecutor {
         public void run() {
             thread = Thread.currentThread();
             try {
-                while (running && !isShutdown) {
+                while (running && !thread.isInterrupted()) {
                     idle = true;
-                    Runnable task = queue.poll(keepAliveTime, TimeUnit.MILLISECONDS);
+                    Runnable task = null;
+                    try {
+                        task = queue.poll(keepAliveTime, TimeUnit.MILLISECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+
                     if (task == null) {
                         synchronized (workers) {
                             if (workers.size() > corePoolSize) {
@@ -237,7 +229,9 @@ public class MyThreadPool implements CustomExecutor {
                         }
                         continue;
                     }
+
                     idle = false;
+                    if (isShutdown) break;
                     LogHelper.info("[Worker] {} executes {}", thread.getName(), task);
                     try {
                         task.run();
@@ -245,24 +239,29 @@ public class MyThreadPool implements CustomExecutor {
                         Thread.currentThread().interrupt();
                     }
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             } finally {
-                boolean shouldAddWorker = false;
-                int currentIdleCount = 0;
                 synchronized (workers) {
                     workers.remove(this);
-                    int activeCount = (int) workers.stream().filter(w -> !w.isIdle()).count();
-                    currentIdleCount = workers.size() - activeCount;
-                    if (currentIdleCount < minSpareThreads && workers.size() < maxPoolSize) {
-                        shouldAddWorker = true;
+                    LogHelper.info("[Worker] {} terminated.", thread.getName());
+                }
+                boolean shouldAddWorker = false;
+                if (!isShutdown) {
+                    synchronized (workers) {
+                        int idleCount = 0;
+                        for (Worker w : workers) {
+                            if (w.idle) {
+                                idleCount++;
+                            }
+                        }
+                        if (idleCount < minSpareThreads && workers.size() < maxPoolSize) {
+                            shouldAddWorker = true;
+                        }
+                    }
+                    if (shouldAddWorker) {
                         addWorker();
+                        LogHelper.info("[Pool] Restored spare thread to maintain minSpareThreads.");
                     }
                 }
-                if (shouldAddWorker) {
-                    LogHelper.info("[Pool] Restored worker to maintain minSpareThreads (idle={}, required={})", currentIdleCount, minSpareThreads);
-                }
-                LogHelper.info("[Worker] {} terminated.", thread.getName());
                 checkIfTerminated();
             }
         }

@@ -4,7 +4,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 public class Main {
-    public static void main(String[] args) throws InterruptedException {
+    public static void main(String[] args) {
         MyThreadPool pool = new MyThreadPool(
                 2, 4, 5, TimeUnit.SECONDS, 5, 1,
                 new CallerRunsPolicy()
@@ -28,9 +28,13 @@ public class Main {
             }
         }
 
-        Thread.sleep(3000);
+        try {
+            Thread.sleep(3000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
 
-        System.out.println("\n=== Тест 2: Перегрузка (выполняются в вызывающем потоке) ===");
+        System.out.println("\n=== Тест 2: Перегрузка ===");
         for (int i = 10; i < 30; i++) {
             final int taskId = i;
             try {
@@ -48,24 +52,30 @@ public class Main {
             }
         }
 
-        Thread.sleep(5000);
-
         System.out.println("\n=== Тест 3: Submit с Future ===");
         try {
             java.util.concurrent.Future<String> future = pool.submit(() -> {
                 Thread.sleep(1000);
                 return "Результат из Future";
             });
-
             System.out.println("Результат Future: " + future.get());
         } catch (Exception e) {
             LogHelper.warn("Ошибка при выполнении задачи через Future", e);
         }
 
-        Thread.sleep(2000);
-
         System.out.println("\n=== Завершение пула ===");
         pool.shutdown();
+
+        try {
+            if (pool.awaitTermination(20, TimeUnit.SECONDS)) {
+                System.out.println("✅ Все задачи завершены.");
+            } else {
+                System.out.println("❌ Таймаут ожидания завершения.");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.out.println("❌ Ожидание прервано.");
+        }
 
         try {
             pool.execute(() -> System.out.println("Эта задача не должна выполниться"));
@@ -73,7 +83,6 @@ public class Main {
             LogHelper.warn("✓ После shutdown задачи правильно отклоняются: " + e.getMessage());
         }
 
-        Thread.sleep(1000);
         System.out.println("=== Тест завершён ===");
     }
 }
